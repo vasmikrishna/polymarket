@@ -3,6 +3,7 @@ import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
 import { BuilderApiKeyCreds } from '@polymarket/builder-signing-sdk';
 import { ethers as ethersV6 } from 'ethers';
 import { Wallet as WalletV5, providers as providersV5 } from 'ethers-v5';
+import { sanitizeBase64Secret } from '@/lib/utils/config';
 
 // SignatureType enum value for POLY_PROXY
 const SignatureType = { POLY_PROXY: 1 };
@@ -115,9 +116,32 @@ export async function POST(request: NextRequest) {
     // ============================================
     // 4. INITIALIZE BUILDER API CREDENTIALS
     // ============================================
+    // Sanitize the base64 secret to handle whitespace and invalid characters
+    const rawSecret = process.env.POLY_BUILDER_SECRET!;
+    console.log('[BuilderConfig] Raw secret length:', rawSecret?.length || 0);
+    console.log('[BuilderConfig] Raw secret preview:', rawSecret ? `${rawSecret.substring(0, 20)}...` : 'undefined');
+    
+    let sanitizedSecret: string;
+    try {
+      sanitizedSecret = sanitizeBase64Secret(rawSecret);
+      console.log('[BuilderConfig] Sanitized secret length:', sanitizedSecret.length);
+      console.log('[BuilderConfig] Sanitized secret preview:', `${sanitizedSecret.substring(0, 20)}...`);
+    } catch (error: any) {
+      console.error('[BuilderConfig] Secret sanitization failed:', error.message);
+      console.error('[BuilderConfig] Raw secret (first 50 chars):', rawSecret?.substring(0, 50));
+      return NextResponse.json(
+        { 
+          success: false, 
+          error: 'Builder API secret is invalid',
+          details: error.message 
+        },
+        { status: 500 }
+      );
+    }
+
     const builderCreds: BuilderApiKeyCreds = {
       key: process.env.POLY_BUILDER_API_KEY!,
-      secret: process.env.POLY_BUILDER_SECRET!,
+      secret: sanitizedSecret,
       passphrase: process.env.POLY_BUILDER_PASSPHRASE!,
     };
 
@@ -249,7 +273,45 @@ export async function POST(request: NextRequest) {
     // ============================================
     const result = await clobClient.postOrder(order, OrderType.GTC);
 
-    console.log('[CLOB Client] Order posted successfully:', result);
+    console.log('[CLOB Client] Order posted result:', result);
+
+    // Check if the result indicates a Cloudflare block
+    const isCloudflareBlock = 
+      (result && typeof result === 'object' && 
+       ((result.error && typeof result.error === 'string' && 
+         (result.error.includes('Cloudflare') || result.error.includes('<!DOCTYPE html>'))) ||
+        result.status === 403));
+
+    if (isCloudflareBlock) {
+      console.error('[CLOB Client] Cloudflare blocked the request');
+      
+      // Extract Cloudflare Ray ID if available
+      let cloudflareRayId = 'unknown';
+      if (result.error && typeof result.error === 'string') {
+        const rayIdMatch = result.error.match(/Ray ID: <strong[^>]*>([^<]+)<\/strong>/);
+        if (rayIdMatch && rayIdMatch[1]) {
+          cloudflareRayId = rayIdMatch[1];
+        }
+      }
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Cloudflare blocked the request',
+          message: 'The request to Polymarket API was blocked by Cloudflare protection. This is a common issue with automated requests.',
+          suggestions: [
+            'Contact Polymarket support to whitelist your server IP address',
+            'Use a proxy or VPN service to route requests',
+            'Check if your server IP has been flagged by Cloudflare',
+            'Consider using Polymarket\'s Builder Signing Server for production use',
+            'Verify your server is not making too many requests (rate limiting)',
+          ],
+          order: order, // Return the created order even though posting failed
+          cloudflareRayId: cloudflareRayId,
+        },
+        { status: 403 }
+      );
+    }
 
     return NextResponse.json({
       success: true,
@@ -260,6 +322,52 @@ export async function POST(request: NextRequest) {
   } catch (error: any) {
     console.error('[Place Order] Error:', error);
     console.error('[Place Order] Error stack:', error.stack);
+
+    // Check if the error is a Cloudflare block
+    const errorMessage = error?.message || String(error);
+    const errorResponse = error?.response || error?.data || error?.body;
+    const isCloudflareBlock = 
+      errorMessage.includes('Cloudflare') ||
+      errorMessage.includes('403') ||
+      error?.status === 403 ||
+      (typeof errorResponse === 'string' && errorResponse.includes('Cloudflare')) ||
+      (errorResponse && typeof errorResponse === 'object' && errorResponse.error && 
+       typeof errorResponse.error === 'string' && errorResponse.error.includes('Cloudflare'));
+
+    if (isCloudflareBlock) {
+      console.error('[Place Order] Cloudflare blocked the request (exception)');
+      
+      // Try to extract Cloudflare Ray ID
+      let cloudflareRayId = 'unknown';
+      const errorText = typeof errorResponse === 'string' 
+        ? errorResponse 
+        : (errorResponse?.error || errorMessage || '');
+      
+      if (typeof errorText === 'string') {
+        const rayIdMatch = errorText.match(/Ray ID: <strong[^>]*>([^<]+)<\/strong>/);
+        if (rayIdMatch && rayIdMatch[1]) {
+          cloudflareRayId = rayIdMatch[1];
+        }
+      }
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Cloudflare blocked the request',
+          message: 'The request to Polymarket API was blocked by Cloudflare protection. This is a common issue with automated requests.',
+          suggestions: [
+            'Contact Polymarket support to whitelist your server IP address',
+            'Use a proxy or VPN service to route requests',
+            'Check if your server IP has been flagged by Cloudflare',
+            'Consider using Polymarket\'s Builder Signing Server for production use',
+            'Verify your server is not making too many requests (rate limiting)',
+          ],
+          cloudflareRayId: cloudflareRayId,
+          details: errorMessage,
+        },
+        { status: 403 }
+      );
+    }
 
     return NextResponse.json(
       {

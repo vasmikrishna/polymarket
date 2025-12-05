@@ -4,6 +4,7 @@ import { ethers } from 'ethers';
 import { createWalletClient, custom, http, WalletClient } from 'viem';
 import { polygon } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
+import { sanitizeBase64Secret } from '@/lib/utils/config';
 
 // Use client-safe config for client-side components
 const RELAYER_URL = typeof window !== 'undefined' 
@@ -123,10 +124,21 @@ async function convertEthersSignerToViemWalletClient(
 export function createBuilderConfig(): BuilderConfig | undefined {
   // Only access server-side env vars (not NEXT_PUBLIC_)
   const apiKey = process.env.POLY_BUILDER_API_KEY || '019ac3e0-faee-7903-ab69-e83ddd2d5015';
-  const secret = process.env.POLY_BUILDER_SECRET || 'TSJp7mmXUjsnzvgP-oqZ4TgaSN-bANqtosFnkfh8X-E=';
+  const rawSecret = process.env.POLY_BUILDER_SECRET || 'TSJp7mmXUjsnzvgP-oqZ4TgaSN-bANqtosFnkfh8X-E=';
   const passphrase = process.env.POLY_BUILDER_PASSPHRASE || '2a5dffdb9a855ee59a3af6491399e203ebe57ccac999016095fcd4e17841e0e2';
+  
+  // Sanitize the base64 secret to handle whitespace and invalid characters
+  let secret: string;
+  try {
+    secret = sanitizeBase64Secret(rawSecret);
+  } catch (error: any) {
+    console.error('[BuilderConfig] Secret sanitization failed:', error.message);
+    console.warn('Builder credentials not configured. Gasless transactions will not work.');
+    return undefined;
+  }
+
   console.log('apiKey', apiKey);
-  console.log('secret', secret);
+  console.log('secret', secret.substring(0, 10) + '...');
   console.log('passphrase', passphrase);
 
   if (!apiKey || !secret || !passphrase) {
