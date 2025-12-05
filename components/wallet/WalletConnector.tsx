@@ -24,70 +24,39 @@ export function WalletConnector({ onWalletConnected, onWalletDisconnected }: Wal
   });
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
+
   // Account selection state
   const [showAccountSelector, setShowAccountSelector] = useState(false);
   const [availableAccounts, setAvailableAccounts] = useState<string[]>([]);
   const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
   const [isFetchingAccounts, setIsFetchingAccounts] = useState(false);
 
-  const handleConnect = async (provider: 'metamask') => {
-    if (provider === 'metamask') {
-      setIsFetchingAccounts(true);
-      setError(null);
+  const handleConnect = async (provider: 'metamask' | 'phantom') => {
+    setIsFetchingAccounts(true);
+    setError(null);
 
-      try {
-        // Fetch available accounts first
-        // Note: eth_requestAccounts will show MetaMask's UI and connect
-        // but we'll show our selector to let user choose which account to use
-        const accounts = await getAvailableAccounts();
-        
-        console.log('Available accounts:', accounts); // Debug log
-        
-        if (!accounts || accounts.length === 0) {
-          setError('No accounts found in MetaMask. Please create an account in MetaMask first.');
-          setIsFetchingAccounts(false);
-          return;
-        }
+    try {
+      // For now, we'll use the generic connectWallet function which handles both
+      // But we might want to add specific logic for each provider later if needed
+      const { connectWallet } = await import('@/lib/wallet/providers');
 
-        // Always show our account selector
-        // This allows users to see all accounts and choose which one to connect with
-        setAvailableAccounts(accounts);
-        setSelectedAddress(accounts[0]); // Default to first account
-        setShowAccountSelector(true);
-        setIsFetchingAccounts(false);
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Failed to fetch accounts';
-        setError(errorMessage);
-        console.error('Error fetching accounts:', err); // Debug log
-        setIsFetchingAccounts(false);
-      }
+      // Note: We're skipping the account selection UI for now to simplify the flow
+      // and because connectWallet handles the connection directly
+      const state = await connectWallet(provider);
+      setWalletState(state);
+      onWalletConnected(state);
+      setIsFetchingAccounts(false);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to connect wallet';
+      setError(errorMessage);
+      console.error('Error connecting wallet:', err);
+      setIsFetchingAccounts(false);
     }
   };
 
   const handleAccountConnect = async () => {
+    // Legacy function - kept if we want to re-enable account selection later
     if (!selectedAddress) return;
-
-    setIsConnecting(true);
-    setError(null);
-    setShowAccountSelector(false);
-
-    try {
-      const state = await connectMetaMask(selectedAddress);
-      setWalletState(state);
-      onWalletConnected(state);
-      
-      // Reset selection state
-      setAvailableAccounts([]);
-      setSelectedAddress(null);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to connect wallet';
-      setError(errorMessage);
-      // Show selector again on error
-      setShowAccountSelector(true);
-    } finally {
-      setIsConnecting(false);
-    }
   };
 
   const handleAccountSelectCancel = () => {
@@ -102,11 +71,9 @@ export function WalletConnector({ onWalletConnected, onWalletDisconnected }: Wal
       const state = await disconnectWallet();
       setWalletState(state);
       onWalletDisconnected();
-      
-      // Reset account selection state
-      setShowAccountSelector(false);
-      setAvailableAccounts([]);
-      setSelectedAddress(null);
+
+      // Force reload to clear all state
+      window.location.reload();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to disconnect wallet';
       setError(errorMessage);
@@ -154,7 +121,7 @@ export function WalletConnector({ onWalletConnected, onWalletDisconnected }: Wal
           </div>
           <p className="text-sm text-gray-600 break-all">{walletState.address}</p>
         </div>
-        
+
         {walletState.accounts.length > 1 && (
           <AccountSwitcher
             accounts={walletState.accounts}
@@ -162,7 +129,7 @@ export function WalletConnector({ onWalletConnected, onWalletDisconnected }: Wal
             onSwitch={handleAccountSwitch}
           />
         )}
-        
+
         {error && (
           <div className="p-2 bg-red-50 text-red-600 text-sm rounded">
             {error}

@@ -10,8 +10,7 @@ import { useWallet } from '@/lib/contexts/WalletContext';
 import { useToast } from '@/components/ui/Toast';
 import { MarketData } from '@/lib/types/market';
 import { OrderParams } from '@/lib/types/order';
-import { ethers } from 'ethers';
-import { createClobClient, placeOrder } from '@/lib/polymarket/clob-client';
+
 
 export default function Home() {
   const { walletState, setWalletState } = useWallet();
@@ -44,7 +43,7 @@ export default function Home() {
 
     try {
       const response = await fetch(`/api/markets/${slug}`);
-      
+
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.error || 'Failed to fetch market data');
@@ -63,7 +62,7 @@ export default function Home() {
   };
 
   const handlePlaceOrder = async (orderParams: OrderParams) => {
-    if (!walletState.signer || !marketData) {
+    if (!walletState.address || !marketData) {
       showToast('Wallet not connected or market data missing', 'error');
       return;
     }
@@ -71,36 +70,100 @@ export default function Home() {
     setIsPlacingOrder(true);
 
     try {
-      // Step 1: Sign order with builder credentials
-      const signResponse = await fetch('/api/builder/sign', {
+      // Step 1: Get the provider for the connected wallet
+      const { getProviderForWallet, ensurePolygon, signTypedDataWithWallet, WalletKind } = await import('@/lib/wallet/wallet-manager');
+
+      if (!walletState.provider) {
+        throw new Error('No wallet provider selected');
+      }
+
+      const provider = getProviderForWallet(walletState.provider as any);
+
+      // Handle null provider gracefully
+      if (!provider) {
+        const walletName = walletState.provider.charAt(0).toUpperCase() + walletState.provider.slice(1);
+        throw new Error(`${walletName} wallet not found. Please make sure it's installed and enabled.`);
+      }
+
+      // Validate provider has request method
+      if (typeof provider.request !== 'function') {
+        throw new Error('Selected wallet does not support signing operations');
+      }
+
+      // Step 2: Ensure we're on Polygon chain
+      showToast('Checking network...', 'info');
+      try {
+        await ensurePolygon(provider);
+      } catch (chainError: any) {
+        if (chainError.message?.includes('User rejected')) {
+          throw new Error('Network switch rejected. Please switch to Polygon manually.');
+        }
+        throw chainError;
+      }
+
+      // Step 3: Build EIP-712 typed data
+      const { buildOrderTypedData } = await import('@/lib/utils/eip712');
+
+      const typedData = buildOrderTypedData({
+        price: orderParams.price,
+        size: orderParams.size,
+        side: orderParams.side,
+        tokenID: orderParams.tokenId,
+        maker: walletState.address,
+      });
+
+      // Step 4: Sign using the wallet manager (with validation)
+      showToast('Please sign the order in your wallet...', 'info');
+      const signature = await signTypedDataWithWallet(provider, walletState.address, typedData);
+
+      // Step 5: Send to server API
+      showToast('Placing order...', 'info');
+      const response = await fetch('/api/placeOrder', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(orderParams),
+        body: JSON.stringify({
+          price: orderParams.price,
+          size: orderParams.size,
+          side: orderParams.side,
+          tokenID: orderParams.tokenId,
+          typedData,
+          signature,
+          signerAddress: walletState.address,
+        }),
       });
 
-      if (!signResponse.ok) {
-        const errorData = await signResponse.json();
-        throw new Error(errorData.error || 'Failed to sign order');
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to place order');
       }
 
-      const signedOrder = await signResponse.json();
+      showToast('Order placed successfully!', 'success');
 
-      // Step 2: Place order via CLOB client
-      if (!walletState.signer || !('provider' in walletState.signer)) {
-        throw new Error('Invalid signer type');
-      }
-      const clobClient = createClobClient(walletState.signer as ethers.JsonRpcSigner);
-      const result = await placeOrder(clobClient, signedOrder);
-
-      showToast('Order placed successfully', 'success');
-      
       // Reset form
       setMarketData(null);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to place order';
-      showToast(errorMessage, 'error');
+    } catch (error: any) {
+      console.error('Order placement error:', error);
+
+      // User-friendly error messages
+      if (error.message?.includes('wallet not found')) {
+        showToast(error.message, 'error');
+      } else if (error.message?.includes('User rejected')) {
+        showToast('Signature rejected by user', 'error');
+      } else if (error.message?.includes('Network switch rejected')) {
+        showToast(error.message, 'error');
+      } else if (error.message?.includes('not connected to the requested chain')) {
+        showToast('Please switch to Polygon network', 'error');
+      } else if (error.message?.includes('missing required fields')) {
+        showToast('Invalid order data. Please try again.', 'error');
+      } else if (error.message?.includes('does not support signing')) {
+        showToast(error.message, 'error');
+      } else {
+        const errorMessage = error instanceof Error ? error.message : 'Failed to place order';
+        showToast(errorMessage, 'error');
+      }
     } finally {
       setIsPlacingOrder(false);
     }
@@ -137,7 +200,7 @@ export default function Home() {
                 signer={walletState.signer}
               />
             </section>
-        </div>
+          </div>
 
           {/* Right Column */}
           <div className="space-y-6">

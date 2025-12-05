@@ -17,7 +17,8 @@ export interface WalletState {
  * This ensures the user always sees the account selection UI
  */
 export async function getAvailableAccounts(): Promise<string[]> {
-  if (typeof window === 'undefined' || !window.ethereum) {
+  const ethereum = getMetaMaskProvider();
+  if (!ethereum) {
     throw new Error('MetaMask is not installed');
   }
 
@@ -25,7 +26,7 @@ export async function getAvailableAccounts(): Promise<string[]> {
     // First, try to request permissions explicitly
     // This will show MetaMask's popup even if already authorized
     try {
-      await window.ethereum.request({
+      await ethereum.request({
         method: 'wallet_requestPermissions',
         params: [
           {
@@ -44,7 +45,7 @@ export async function getAvailableAccounts(): Promise<string[]> {
 
     // Request account access - this will show MetaMask's account selection UI
     // and return all accounts that the user selects/authorizes
-    const accounts = await window.ethereum.request({
+    const accounts = await ethereum.request({
       method: 'eth_requestAccounts',
     }) as string[];
 
@@ -58,7 +59,7 @@ export async function getAvailableAccounts(): Promise<string[]> {
     if (error.code === 4001) {
       throw new Error('User rejected account access. Please approve the connection in MetaMask.');
     }
-    
+
     // Handle other errors
     const errorMessage = error?.message || 'Failed to fetch accounts';
     throw new Error(`Failed to fetch accounts: ${errorMessage}. Please ensure MetaMask is unlocked.`);
@@ -66,15 +67,19 @@ export async function getAvailableAccounts(): Promise<string[]> {
 }
 
 export async function connectMetaMask(selectedAddress?: string): Promise<WalletState> {
-  if (typeof window === 'undefined' || !window.ethereum) {
+  const ethereum = getMetaMaskProvider();
+  if (!ethereum) {
     throw new Error('MetaMask is not installed');
   }
 
-  const provider = new ethers.BrowserProvider(window.ethereum);
-  
+  // Ensure we are on Polygon
+  await switchNetwork(ethereum);
+
+  const provider = new ethers.BrowserProvider(ethereum);
+
   // Request account access
   await provider.send('eth_requestAccounts', []);
-  
+
   // Get all accounts
   const accounts = await provider.listAccounts();
   const accountAddresses = accounts.map((acc) => acc.address);
@@ -112,48 +117,181 @@ export async function connectMetaMask(selectedAddress?: string): Promise<WalletS
   };
 }
 
-export async function switchAccount(provider: ethers.BrowserProvider, accountIndex: number): Promise<WalletState> {
-  const accounts = await provider.listAccounts();
-  if (accountIndex >= accounts.length) {
-    throw new Error('Account index out of range');
+/**
+ * Helper to find the specific MetaMask provider
+ * Handles cases where multiple wallets inject into window.ethereum
+ */
+export function getMetaMaskProvider(): any {
+  if (typeof window === 'undefined') return null;
+
+  // Check for EIP-6963 style providers
+  if (window.ethereum?.providers) {
+    const provider = window.ethereum.providers.find((p: any) => p.isMetaMask);
+    if (provider) return provider;
   }
 
-  const signer = await provider.getSigner(accounts[accountIndex].address);
+  // Fallback to standard injection
+  if (window.ethereum?.isMetaMask) {
+    return window.ethereum;
+  }
+
+  return null;
+}
+
+/**
+ * Helper to find the Phantom provider
+ */
+export function getPhantomProvider(): any {
+  if (typeof window === 'undefined') return null;
+
+  // Check for EIP-6963 style providers
+  if (window.ethereum?.providers) {
+    const provider = window.ethereum.providers.find((p: any) => p.isPhantom);
+    if (provider) return provider;
+  }
+
+  // Phantom specifically injects into window.phantom?.ethereum
+  if ((window as any).phantom?.ethereum) {
+    return (window as any).phantom.ethereum;
+  }
+
+  return null;
+}
+
+export const POLYGON_CHAIN_ID = '0x89'; // 137
+export const POLYGON_RPC_URL = 'https://polygon-rpc.com';
+
+export async function switchNetwork(provider: any): Promise<void> {
+  try {
+    await provider.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: POLYGON_CHAIN_ID }],
+    });
+  } catch (switchError: any) {
+    // This error code indicates that the chain has not been added to MetaMask.
+    if (switchError.code === 4902) {
+      try {
+        await provider.request({
+          method: 'wallet_addEthereumChain',
+          params: [
+            {
+              chainId: POLYGON_CHAIN_ID,
+              chainName: 'Polygon Mainnet',
+              rpcUrls: [POLYGON_RPC_URL],
+              nativeCurrency: {
+                name: 'MATIC',
+                symbol: 'MATIC',
+                decimals: 18,
+              },
+              blockExplorerUrls: ['https://polygonscan.com/'],
+            },
+          ],
+        });
+      } catch (addError) {
+        throw new Error('Failed to add Polygon network');
+      }
+    } else {
+      throw switchError;
+    }
+  }
+}
+
+export async function checkConnection(): Promise<WalletState | null> {
+  // Check MetaMask first
+  const metamask = getMetaMaskProvider();
+  if (metamask && metamask.selectedAddress) {
+    const provider = new ethers.BrowserProvider(metamask);
+    const signer = await provider.getSigner();
+    const address = await signer.getAddress();
+    const accounts = await provider.listAccounts();
+
+    return {
+      provider: 'metamask',
+      address,
+      signer: signer as ethers.JsonRpcSigner,
+      providerInstance: provider,
+      accounts: accounts.map(a => a.address),
+      isConnected: true
+    };
+  }
+
+  // Check Phantom
+  const phantom = getPhantomProvider();
+  if (phantom && phantom.selectedAddress) {
+    const provider = new ethers.BrowserProvider(phantom);
+    const signer = await provider.getSigner();
+    const address = await signer.getAddress();
+    const accounts = await provider.listAccounts();
+
+    return {
+      provider: 'phantom',
+      address,
+      signer: signer as ethers.JsonRpcSigner,
+      providerInstance: provider,
+      accounts: accounts.map(a => a.address),
+      isConnected: true
+    };
+  }
+
+  return null;
+}
+
+export async function connectWallet(walletType: 'metamask' | 'phantom'): Promise<WalletState> {
+  let ethereum;
+
+  if (walletType === 'metamask') {
+    ethereum = getMetaMaskProvider();
+    if (!ethereum) throw new Error('MetaMask is not installed');
+  } else if (walletType === 'phantom') {
+    ethereum = getPhantomProvider();
+    if (!ethereum) throw new Error('Phantom is not installed');
+  }
+
+  // Ensure we are on Polygon
+  await switchNetwork(ethereum);
+
+  const provider = new ethers.BrowserProvider(ethereum);
+
+  // Request account access
+  await provider.send('eth_requestAccounts', []);
+
+  // Get all accounts
+  const accounts = await provider.listAccounts();
+  const accountAddresses = accounts.map((acc) => acc.address);
+
+  if (accountAddresses.length === 0) {
+    throw new Error('No accounts available');
+  }
+
+  // Get signer for the first account
+  const signer = await provider.getSigner();
   const address = await signer.getAddress();
 
   return {
-    provider: 'metamask',
+    provider: walletType,
     address,
     signer: signer as ethers.JsonRpcSigner,
     providerInstance: provider,
-    accounts: accounts.map((acc) => acc.address),
+    accounts: accountAddresses,
     isConnected: true,
   };
 }
 
-/**
- * Disconnects the wallet and revokes MetaMask permissions
- * This ensures that reconnecting will show the MetaMask popup again
- */
 export async function disconnectWallet(): Promise<WalletState> {
-  if (typeof window !== 'undefined' && window.ethereum) {
+  const metamask = getMetaMaskProvider();
+  if (metamask) {
     try {
-      // Try to revoke permissions to force re-authorization on next connect
-      // This will make MetaMask show the popup again when reconnecting
-      await window.ethereum.request({
+      await metamask.request({
         method: 'wallet_revokePermissions',
-        params: [
-          {
-            eth_accounts: {},
-          },
-        ],
+        params: [{ eth_accounts: {} }],
       });
-    } catch (error) {
-      // If revoking fails (e.g., permissions already revoked), that's okay
-      // We'll still clear the local state
-      console.log('Note: Could not revoke permissions (may already be revoked)');
+    } catch (e) {
+      console.log('Could not revoke MetaMask permissions');
     }
   }
+
+  // Phantom doesn't support wallet_revokePermissions the same way usually, 
+  // but we can try or just rely on local cleanup.
 
   return {
     provider: null,

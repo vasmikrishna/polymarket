@@ -17,6 +17,20 @@ export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayPr
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [usdcBalance, setUsdcBalance] = useState<string>('0');
+  const [approvals, setApprovals] = useState({
+    usdc: false,
+    ctf: false,
+  });
+  const [isApproving, setIsApproving] = useState({
+    usdc: false,
+    ctf: false,
+  });
+
+  const USDC_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+  const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
+  const CTF_EXCHANGE = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
+
   useEffect(() => {
     if (userAddress && signer) {
       // Check if Safe already exists for this user
@@ -25,20 +39,20 @@ export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayPr
           // First check localStorage
           const storedSafeAddress = localStorage.getItem(`safe_${userAddress}`);
           if (storedSafeAddress) {
-            await fetchSafeBalance(storedSafeAddress);
+            await fetchSafeData(storedSafeAddress);
             return;
           }
 
           // If not in localStorage, try to get the expected Safe address
           const relayerClient = await createRelayerClient(signer, undefined);
           const expectedAddress = await getExpectedSafeAddress(relayerClient, userAddress);
-          
+
           if (expectedAddress) {
             // Check if it's actually deployed
             const isDeployed = await relayerClient.getDeployed(expectedAddress);
             if (isDeployed) {
               localStorage.setItem(`safe_${userAddress}`, expectedAddress);
-              await fetchSafeBalance(expectedAddress);
+              await fetchSafeData(expectedAddress);
             }
           }
         } catch (error) {
@@ -51,24 +65,121 @@ export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayPr
     }
   }, [userAddress, signer]);
 
-  const fetchSafeBalance = async (safeAddress: string) => {
+  const fetchSafeData = async (safeAddress: string) => {
     if (!signer?.provider) return;
 
     setIsLoading(true);
     setError(null);
 
     try {
+      // Fetch MATIC balance
       const balance = await signer.provider.getBalance(safeAddress);
+
+      // Fetch USDC balance
+      const usdcContract = new ethers.Contract(
+        USDC_ADDRESS,
+        ['function balanceOf(address) view returns (uint256)', 'function allowance(address,address) view returns (uint256)'],
+        signer.provider
+      );
+      const usdcBal = await usdcContract.balanceOf(safeAddress);
+      const usdcAllowance = await usdcContract.allowance(safeAddress, CTF_ADDRESS);
+
+      // Fetch CTF approval
+      const ctfContract = new ethers.Contract(
+        CTF_ADDRESS,
+        ['function isApprovedForAll(address,address) view returns (bool)'],
+        signer.provider
+      );
+      const ctfApproved = await ctfContract.isApprovedForAll(safeAddress, CTF_EXCHANGE);
+
       setSafeInfo({
         address: safeAddress,
         balance: ethers.formatEther(balance),
         deployed: true,
       });
+      setUsdcBalance(ethers.formatUnits(usdcBal, 6)); // USDC has 6 decimals
+      setApprovals({
+        usdc: usdcAllowance > 0,
+        ctf: ctfApproved,
+      });
+
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to fetch balance';
       setError(errorMessage);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleApproveUSDC = async () => {
+    if (!safeInfo?.address || !signer) return;
+    setIsApproving(prev => ({ ...prev, usdc: true }));
+    setError(null);
+
+    try {
+      const relayerClient = await createRelayerClient(signer, undefined);
+
+      const erc20Interface = new ethers.Interface([
+        'function approve(address spender, uint256 value) public returns (bool)'
+      ]);
+
+      const data = erc20Interface.encodeFunctionData('approve', [
+        CTF_ADDRESS,
+        ethers.MaxUint256
+      ]);
+
+      const tx = {
+        to: USDC_ADDRESS,
+        data: data,
+        value: '0',
+        operation: 0, // Call
+      };
+
+      const response = await (relayerClient as any).executeSafeTransactions([tx]);
+      await response.wait();
+
+      await fetchSafeData(safeInfo.address);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to approve USDC';
+      setError(errorMessage);
+    } finally {
+      setIsApproving(prev => ({ ...prev, usdc: false }));
+    }
+  };
+
+  const handleApproveTrading = async () => {
+    if (!safeInfo?.address || !signer) return;
+    setIsApproving(prev => ({ ...prev, ctf: true }));
+    setError(null);
+
+    try {
+      const relayerClient = await createRelayerClient(signer, undefined);
+
+      const ctfInterface = new ethers.Interface([
+        'function setApprovalForAll(address operator, bool approved) public'
+      ]);
+
+      const data = ctfInterface.encodeFunctionData('setApprovalForAll', [
+        CTF_EXCHANGE,
+        true
+      ]);
+
+      const tx = {
+        to: CTF_ADDRESS,
+        data: data,
+        value: '0',
+        operation: 0, // Call
+      };
+
+      const response = await (relayerClient as any).executeSafeTransactions([tx]);
+      await response.wait();
+
+      await fetchSafeData(safeInfo.address);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to approve trading';
+      setError(errorMessage);
+    } finally {
+      setIsApproving(prev => ({ ...prev, ctf: false }));
     }
   };
 
@@ -96,7 +207,7 @@ export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayPr
 
       // Fetch balance for the deployed Safe
       if (proxyAddress && signer?.provider) {
-        await fetchSafeBalance(proxyAddress);
+        await fetchSafeData(proxyAddress);
       } else {
         // Update state with transaction hash if Safe address not yet available
         setSafeInfo({
@@ -108,7 +219,7 @@ export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayPr
       }
     } catch (err: any) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to deploy Safe wallet';
-      
+
       // Check if the error indicates Safe is already deployed
       if (
         errorMessage.toLowerCase().includes('already deployed') ||
@@ -119,13 +230,13 @@ export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayPr
         try {
           const relayerClient = await createRelayerClient(signer, undefined);
           const expectedAddress = await getExpectedSafeAddress(relayerClient, userAddress);
-          
+
           if (expectedAddress) {
             const isDeployed = await relayerClient.getDeployed(expectedAddress);
             if (isDeployed) {
               // Safe exists, fetch its info
               localStorage.setItem(`safe_${userAddress}`, expectedAddress);
-              await fetchSafeBalance(expectedAddress);
+              await fetchSafeData(expectedAddress);
               setError(null); // Clear error since we found the Safe
               return;
             }
@@ -133,7 +244,7 @@ export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayPr
         } catch (getAddressError) {
           console.error('Error getting existing Safe address:', getAddressError);
         }
-        
+
         setError('Safe already deployed! Please refresh the page to see your Safe wallet.');
       } else {
         setError(errorMessage);
@@ -156,22 +267,53 @@ export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayPr
       <h3 className="text-lg font-semibold">Proxy Wallet (Safe)</h3>
 
       {safeInfo ? (
-        <div className="space-y-2">
-          <div>
-            <p className="text-sm text-gray-600">Address</p>
-            <p className="text-sm font-mono break-all">{safeInfo.address}</p>
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-sm text-gray-600">Address</p>
+              <p className="text-sm font-mono break-all">{safeInfo.address}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">MATIC Balance</p>
+              <p className="text-lg font-semibold">{parseFloat(safeInfo.balance).toFixed(4)} MATIC</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">USDC Balance</p>
+              <p className="text-lg font-semibold">{parseFloat(usdcBalance).toFixed(2)} USDC</p>
+            </div>
           </div>
-          <div>
-            <p className="text-sm text-gray-600">Balance</p>
-            <p className="text-lg font-semibold">{parseFloat(safeInfo.balance).toFixed(4)} MATIC</p>
+
+          <div className="space-y-2 pt-2 border-t">
+            <h4 className="text-sm font-medium">Approvals</h4>
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                variant={approvals.usdc ? "secondary" : "primary"}
+                onClick={handleApproveUSDC}
+                isLoading={isApproving.usdc}
+                disabled={approvals.usdc}
+                className="w-full text-xs"
+              >
+                {approvals.usdc ? 'USDC Approved' : 'Approve USDC'}
+              </Button>
+              <Button
+                variant={approvals.ctf ? "secondary" : "primary"}
+                onClick={handleApproveTrading}
+                isLoading={isApproving.ctf}
+                disabled={approvals.ctf}
+                className="w-full text-xs"
+              >
+                {approvals.ctf ? 'Trading Approved' : 'Approve Trading'}
+              </Button>
+            </div>
           </div>
+
           <Button
             variant="secondary"
-            onClick={() => fetchSafeBalance(safeInfo.address)}
+            onClick={() => fetchSafeData(safeInfo.address)}
             isLoading={isLoading}
             className="w-full"
           >
-            Refresh Balance
+            Refresh Data
           </Button>
         </div>
       ) : (

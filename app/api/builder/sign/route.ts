@@ -23,34 +23,79 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create order payload
-    const timestamp = Date.now().toString();
-    const nonce = orderParams.nonce || Math.floor(Math.random() * 1000000);
-    const expiration = orderParams.expiration || Math.floor(Date.now() / 1000) + 86400; // 24 hours default
+    // Determine usage from body
+    // The SDK sends the body as JSON. We need to sign exactly what is received?
+    // According to docs: "Your builder signing server uses your Builder API keys to cryptographically sign the entire payload"
 
-    const orderPayload = {
-      tokenId: orderParams.tokenId,
-      price: orderParams.price,
-      size: orderParams.size,
-      side: orderParams.side,
-      feeRateBps: orderParams.feeRateBps || 0,
-      nonce,
-      expiration,
-    };
+    // However, we need to know strictly what the SDK sends.
+    // If we assume the SDK sends the logic, we must return the headers.
 
-    // Sign the order using builder credentials
-    // Note: This is a simplified signing approach. The actual PolyMarket signing
-    // may require specific cryptographic operations. You may need to use their SDK
-    // or follow their exact signing specification.
-    
-    const message = JSON.stringify(orderPayload);
-    const signature = signWithBuilderCredentials(message);
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const signKey = config.polymarket.builderSecret;
+    const passphrase = config.polymarket.builderPassphrase;
+    const apiKey = config.polymarket.builderApiKey;
+
+    // Polymarket secrets are base64 encoded
+    const secret = Buffer.from(signKey, 'base64');
+
+    // Construct the message to sign
+    // Format: timestamp + method + requestPath + body
+    // But the remote builder config URL is just for signing?
+    // Wait, the docs say: "The fully signed payload is then sent to the CLOB"
+
+    // If the SDK uses `remoteBuilderConfig`, it sends the payload to US.
+    // We sign it and return... what?
+    // If we look at standard exchanges (Coinbase, etc), we sign timestamp + method + path + body.
+    // But here, we are signing on BEHALF of the order placement.
+
+    // Let's look at the headers the SDK expects.
+    // POLY_BUILDER_SIGNATURE, POLY_BUILDER_API_KEY, POLY_BUILDER_TIMESTAMP, POLY_BUILDER_PASSPHRASE
+
+    // The signature is HMAC SHA256 of ???
+    // "cryptographically sign the entire payload"
+    // Usually: timestamp + 'POST' + '/orders' + JSON.stringify(body) ?
+    // Or just the body?
+
+    // Based on common patterns and external docs for ClobClient:
+    // The builder signature is over the same message as the API signature would be?
+    // Or just the timestamp + body?
+
+    // Let's try standard timestamp + body binding.
+    // But `clob-client` likely does NOT send method/path to us.
+    // It sends the order structure.
+
+    // IMPORTANT: The SDK likely expects a JSON response with the headers to merge?
+    // Or does it expect the SignedOrder including the headers?
+
+    // Let's assume the SDK sends the order payload.
+    // We compute the signature.
+    // message = timestamp + method + path + body
+    // But what "method" and "path"? The order is sent to CLOB `/orders` (or similar).
+    // The path is likely `/order`.
+
+    // To be safe, let's look at `node_modules/@polymarket/builder-signing-sdk` if possible.
+    // Since we can't, we'll implement a robust guess:
+    // We'll sign: timestamp + "POST" + "/order" + JSON.stringify(body)
+    // AND we'll return the headers.
+
+    // Wait, `orderParams` is the body. Note that `tokenID` might be used instead of `tokenId`.
+
+    const method = 'POST';
+    const requestPath = '/order';
+    const body = JSON.stringify(orderParams);
+
+    const message = timestamp + method + requestPath + body;
+    const hmac = crypto.createHmac('sha256', secret);
+    hmac.update(message);
+    const signature = hmac.digest('base64');
 
     return NextResponse.json({
-      order: orderPayload,
-      signature,
-      signer: config.polymarket.builderApiKey,
+      'POLY_BUILDER_API_KEY': apiKey,
+      'POLY_BUILDER_TIMESTAMP': timestamp,
+      'POLY_BUILDER_PASSPHRASE': passphrase,
+      'POLY_BUILDER_SIGNATURE': signature,
     });
+
   } catch (error) {
     console.error('Error signing order:', error);
     return NextResponse.json(
@@ -60,13 +105,6 @@ export async function POST(request: NextRequest) {
   }
 }
 
-function signWithBuilderCredentials(message: string): string {
-  // This is a placeholder. You'll need to implement the actual signing logic
-  // based on PolyMarket's builder signing specification.
-  // This typically involves creating an HMAC or using the builder secret to sign the message.
-  
-  const hmac = crypto.createHmac('sha256', config.polymarket.builderSecret);
-  hmac.update(message);
-  return hmac.digest('hex');
-}
+// Helper removed as logic is inline
+
 

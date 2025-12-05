@@ -20,22 +20,88 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     isConnected: false,
   });
 
-  // Load wallet state from localStorage on mount
+  // Load wallet state from localStorage on mount and verify with MetaMask
   useEffect(() => {
-    const stored = localStorage.getItem('walletState');
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        // Note: We can't store signer/provider instances, so we'll need to reconnect
-        setWalletState({
-          ...parsed,
-          signer: null,
-          providerInstance: null,
-        });
-      } catch (e) {
-        // Ignore parse errors
+    const initWallet = async () => {
+      const stored = localStorage.getItem('walletState');
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored);
+
+          // Check actual MetaMask connection status
+          const { checkConnection } = await import('@/lib/wallet/providers');
+          const actualState = await checkConnection();
+
+          if (actualState) {
+            // If connected in MetaMask, use that state (it might be different account than stored)
+            setWalletState(actualState);
+          } else {
+            // If not connected in MetaMask, clear stored state
+            localStorage.removeItem('walletState');
+            setWalletState({
+              provider: null,
+              address: null,
+              signer: null,
+              providerInstance: null,
+              accounts: [],
+              isConnected: false,
+            });
+          }
+        } catch (e) {
+          console.error('Error restoring wallet state:', e);
+        }
       }
-    }
+    };
+
+    initWallet();
+  }, []);
+
+  // Listen for MetaMask events
+  useEffect(() => {
+    const initEvents = async () => {
+      const { getMetaMaskProvider } = await import('@/lib/wallet/providers');
+      const ethereum = getMetaMaskProvider();
+
+      if (ethereum) {
+        const handleAccountsChanged = async (accounts: string[]) => {
+          if (accounts.length === 0) {
+            // User disconnected
+            setWalletState({
+              provider: null,
+              address: null,
+              signer: null,
+              providerInstance: null,
+              accounts: [],
+              isConnected: false,
+            });
+          } else {
+            // Account changed - re-sync
+            const { checkConnection } = await import('@/lib/wallet/providers');
+            const newState = await checkConnection();
+            if (newState) {
+              setWalletState(newState);
+            }
+          }
+        };
+
+        const handleChainChanged = () => {
+          // Reload page on chain change as recommended by MetaMask
+          window.location.reload();
+        };
+
+        ethereum.on('accountsChanged', handleAccountsChanged);
+        ethereum.on('chainChanged', handleChainChanged);
+
+        return () => {
+          if (ethereum.removeListener) {
+            ethereum.removeListener('accountsChanged', handleAccountsChanged);
+            ethereum.removeListener('chainChanged', handleChainChanged);
+          }
+        };
+      }
+    };
+
+    initEvents();
   }, []);
 
   // Save wallet state to localStorage
