@@ -207,49 +207,159 @@ export function clearRememberedWallet(): void {
     console.log('[clearRememberedWallet] Cleared');
 }
 
-/**
- * Ensure wallet is on Polygon chain, switch or add if needed
- */
-export async function ensurePolygon(provider: any): Promise<void> {
-    const currentChainId = await provider.request({ method: 'eth_chainId' });
+const POLYGON_CHAIN_ID = 137;
 
-    if (currentChainId === POLYGON_CHAIN_ID_HEX) {
-        return; // Already on Polygon
+/**
+ * Universal chain ID getter that works with all provider shapes
+ */
+async function _getChainId(provider: any): Promise<string | null> {
+    // 1. If provider.request exists
+    if (provider?.request) {
+        try {
+            const chainId = await provider.request({ method: "eth_chainId" });
+            if (chainId) return chainId;
+        } catch { }
     }
 
-    try {
-        // Try to switch to Polygon
-        await provider.request({
-            method: 'wallet_switchEthereumChain',
-            params: [{ chainId: POLYGON_CHAIN_ID_HEX }],
-        });
-    } catch (switchError: any) {
-        // Chain not added to wallet
-        if (switchError.code === 4902) {
-            try {
-                // Add Polygon to wallet
-                await provider.request({
-                    method: 'wallet_addEthereumChain',
-                    params: [POLYGON_CONFIG],
-                });
+    // 2. If provider.send exists (ethers v5)
+    if (provider?.send) {
+        try {
+            const chainId = await provider.send("eth_chainId", []);
+            if (chainId) return chainId;
+        } catch { }
+    }
 
-                // Try switch again after adding
-                await provider.request({
-                    method: 'wallet_switchEthereumChain',
+    // 3. If provider.provider.request exists (WalletConnect, Coinbase)
+    if (provider?.provider?.request) {
+        try {
+            const chainId = await provider.provider.request({ method: "eth_chainId" });
+            if (chainId) return chainId;
+        } catch { }
+    }
+
+    // 4. Fallback: net_version
+    try {
+        const v =
+            (provider?.request && await provider.request({ method: "net_version" })) ||
+            (provider?.send && await provider.send("net_version", [])) ||
+            (provider?.provider?.request && await provider.provider.request({ method: "net_version" }));
+
+        if (v) return "0x" + parseInt(v, 10).toString(16);
+    } catch { }
+
+    return null;
+}
+
+function isEip1193Provider(obj: any): obj is { request: Function } {
+    return !!obj && typeof obj.request === "function";
+}
+
+function isEthersProvider(obj: any): obj is { getNetwork?: Function, send?: Function, provider?: any } {
+    return !!obj && (typeof obj.getNetwork === "function" || typeof obj.send === "function");
+}
+
+async function _callRequest(provider: any, payload: { method: string; params?: any[] }) {
+    if (!provider) throw new Error("No provider available");
+
+    if (isEip1193Provider(provider)) {
+        return provider.request(payload);
+    }
+
+    if (provider.provider && isEip1193Provider(provider.provider)) {
+        return provider.provider.request(payload);
+    }
+
+    if (typeof provider.send === "function") {
+        return provider.send(payload.method, payload.params ?? []);
+    }
+
+    if (typeof provider.sendAsync === "function") {
+        return new Promise((resolve, reject) => {
+            provider.sendAsync(
+                { jsonrpc: "2.0", id: Date.now(), method: payload.method, params: payload.params ?? [] },
+                (err: any, res: any) => (err ? reject(err) : resolve(res?.result ?? res))
+            );
+        });
+    }
+
+    if (provider.provider) {
+        return _callRequest(provider.provider, payload);
+    }
+
+    throw new Error("Provider does not support requests");
+}
+
+/**
+ * Ensure wallet is on Polygon chain, switch or add if needed
+ * Returns true if on Polygon or successfully switched, false otherwise
+ */
+export async function ensurePolygon(provider: any): Promise<boolean> {
+    try {
+        if (isEthersProvider(provider) && typeof provider.getNetwork === "function") {
+            const net = await provider.getNetwork();
+            if (net && typeof net.chainId === "number") {
+                if (net.chainId === POLYGON_CHAIN_ID) return true;
+            }
+        }
+
+        let chainIdResult: any;
+        try {
+            chainIdResult = await _callRequest(provider, { method: "eth_chainId" });
+        } catch (err) {
+            try {
+                chainIdResult = await _callRequest(provider, { method: "net_version" });
+            } catch (e) {
+                chainIdResult = null;
+            }
+        }
+
+        let currentChainHex: string | null = null;
+        if (typeof chainIdResult === "string") {
+            if (chainIdResult.startsWith("0x")) currentChainHex = chainIdResult;
+            else currentChainHex = "0x" + parseInt(chainIdResult, 10).toString(16);
+        } else if (typeof chainIdResult === "number") {
+            currentChainHex = "0x" + chainIdResult.toString(16);
+        }
+
+        if (currentChainHex === POLYGON_CHAIN_ID_HEX) return true;
+
+        try {
+            await _callRequest(provider, {
+                method: "wallet_switchEthereumChain",
+                params: [{ chainId: POLYGON_CHAIN_ID_HEX }],
+            });
+            return true;
+        } catch (switchErr: any) {
+            try {
+                await _callRequest(provider, {
+                    method: "wallet_addEthereumChain",
+                    params: [
+                        {
+                            chainId: POLYGON_CHAIN_ID_HEX,
+                            chainName: "Polygon Mainnet",
+                            nativeCurrency: { name: "MATIC", symbol: "MATIC", decimals: 18 },
+                            rpcUrls: ["https://polygon-rpc.com/"],
+                            blockExplorerUrls: ["https://polygonscan.com/"],
+                        },
+                    ],
+                });
+                await _callRequest(provider, {
+                    method: "wallet_switchEthereumChain",
                     params: [{ chainId: POLYGON_CHAIN_ID_HEX }],
                 });
-            } catch (addError: any) {
-                if (addError.code === 4001) {
-                    throw new Error('User rejected adding Polygon network');
+                return true;
+            } catch (addErr) {
+                if (process.env.NODE_ENV === "development") {
+                    console.warn("ensurePolygon: chain switch/add failed", switchErr, addErr);
                 }
-                throw new Error(`Failed to add Polygon network: ${addError.message}`);
+                return false;
             }
-        } else if (switchError.code === 4001) {
-            // User rejected the switch
-            throw new Error('User rejected network switch');
-        } else {
-            throw new Error(`Failed to switch to Polygon: ${switchError.message}`);
         }
+    } catch (err) {
+        if (process.env.NODE_ENV === "development") {
+            console.error("ensurePolygon: unexpected provider shape or error", err);
+        }
+        return false;
     }
 }
 
@@ -277,16 +387,84 @@ export async function signTypedDataWithWallet(
         throw new Error('Typed data missing required fields (domain, types, message, or primaryType)');
     }
 
-    // Verify chain ID matches
-    const currentChainId = await provider.request({ method: 'eth_chainId' });
-    const expectedChainIdHex = '0x' + Number(typedData.domain.chainId).toString(16);
+    // Verify chain ID matches using universal provider detection
+    let chainIdHex = await _getChainId(provider);
 
-    if (currentChainId !== expectedChainIdHex) {
-        throw new Error('Provider is not connected to the requested chain');
+    if (!chainIdHex) {
+        throw new Error("Unable to determine network chain ID from provider");
+    }
+
+    // Normalize to hex format
+    if (!chainIdHex.startsWith("0x")) {
+        chainIdHex = "0x" + parseInt(chainIdHex, 10).toString(16);
+    }
+
+    const expected = "0x" + Number(typedData.domain.chainId).toString(16);
+
+    if (chainIdHex !== expected) {
+        // Wallet is on wrong network - attempt to switch
+        if (provider?.request) {
+            try {
+                await provider.request({
+                    method: "wallet_switchEthereumChain",
+                    params: [{ chainId: expected }]
+                });
+            } catch (switchErr: any) {
+                // If chain not added, try to add it (assumed Polygon)
+                if (switchErr.code === 4902) {
+                    try {
+                        await provider.request({
+                            method: "wallet_addEthereumChain",
+                            params: [{
+                                chainId: expected,
+                                chainName: "Polygon Mainnet",
+                                nativeCurrency: { name: "MATIC", symbol: "MATIC", decimals: 18 },
+                                rpcUrls: ["https://polygon-rpc.com/"],
+                                blockExplorerUrls: ["https://polygonscan.com/"],
+                            }],
+                        });
+                    } catch { }
+                }
+            }
+        }
+
+        // Retry retrieving chainId after switching
+        chainIdHex = await _getChainId(provider);
+
+        if (!chainIdHex) {
+            throw new Error("Wallet must be connected to Polygon network");
+        }
+
+        if (!chainIdHex.startsWith("0x")) {
+            chainIdHex = "0x" + parseInt(chainIdHex, 10).toString(16);
+        }
+
+        if (chainIdHex !== expected) {
+            throw new Error("Wallet must be connected to Polygon network");
+        }
+    }
+
+    // Ensure wallet is authorized - request accounts first
+    try {
+        if (provider?.request) {
+            const accounts = await provider.request({ method: 'eth_requestAccounts' });
+            if (!accounts || accounts.length === 0) {
+                throw new Error('No accounts found. Please connect your wallet.');
+            }
+        }
+    } catch (err: any) {
+        if (err.code === 4001) {
+            throw new Error('User rejected wallet connection');
+        }
+        // If it's our custom error, re-throw it
+        if (err.message.includes('No accounts')) {
+            throw err;
+        }
+        // Otherwise, continue - some providers might not support eth_requestAccounts
     }
 
     try {
-        const signature = await provider.request({
+        const signature = await _callRequest(provider, {
             method: 'eth_signTypedData_v4',
             params: [signerAddress, JSON.stringify(typedData)],
         });

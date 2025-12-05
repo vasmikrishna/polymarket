@@ -42,9 +42,10 @@ export const ToastContext = React.createContext<ToastContextType | null>(null);
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Array<{ id: number; message: string; type: ToastType }>>([]);
+  const toastIdCounter = React.useRef(0);
 
   const showToast = (message: string, type: ToastType) => {
-    const id = Date.now();
+    const id = Date.now() + toastIdCounter.current++;
     setToasts((prev) => [...prev, { id, message, type }]);
   };
 

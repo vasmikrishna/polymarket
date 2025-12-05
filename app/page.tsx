@@ -12,6 +12,7 @@ import { MarketData } from '@/lib/types/market';
 import { OrderParams } from '@/lib/types/order';
 
 
+
 export default function Home() {
   const { walletState, setWalletState } = useWallet();
   const { showToast } = useToast();
@@ -70,53 +71,79 @@ export default function Home() {
     setIsPlacingOrder(true);
 
     try {
-      // Step 1: Get the provider for the connected wallet
-      const { getProviderForWallet, ensurePolygon, signTypedDataWithWallet, WalletKind } = await import('@/lib/wallet/wallet-manager');
+      const { ensurePolygon, signTypedDataWithWallet } = await import('@/lib/wallet/wallet-manager');
 
-      if (!walletState.provider) {
-        throw new Error('No wallet provider selected');
+      if (!walletState.provider || !walletState.address) {
+        throw new Error('Please connect your wallet first');
       }
 
-      const provider = getProviderForWallet(walletState.provider as any);
+      const provider = walletState.provider;
 
-      // Handle null provider gracefully
-      if (!provider) {
-        const walletName = walletState.provider.charAt(0).toUpperCase() + walletState.provider.slice(1);
-        throw new Error(`${walletName} wallet not found. Please make sure it's installed and enabled.`);
-      }
-
-      // Validate provider has request method
-      if (typeof provider.request !== 'function') {
+      if (!walletState.signer) {
         throw new Error('Selected wallet does not support signing operations');
       }
 
-      // Step 2: Ensure we're on Polygon chain
+      // Ensure we're on Polygon chain
       showToast('Checking network...', 'info');
-      try {
-        await ensurePolygon(provider);
-      } catch (chainError: any) {
-        if (chainError.message?.includes('User rejected')) {
-          throw new Error('Network switch rejected. Please switch to Polygon manually.');
-        }
-        throw chainError;
+
+      // Use window.ethereum for better chain switching compatibility
+      const effectiveProvider = (window as any).ethereum || provider;
+
+      const switched = await ensurePolygon(effectiveProvider);
+      if (!switched) {
+        throw new Error('Please switch your wallet to Polygon (MATIC) network manually.');
       }
 
-      // Step 3: Build EIP-712 typed data
+      // Build EIP-712 typed data
       const { buildOrderTypedData } = await import('@/lib/utils/eip712');
+      const { getProviderForWallet } = await import('@/lib/wallet/wallet-manager');
+      const { createRelayerClient, getExpectedSafeAddress } = await import('@/lib/polymarket/relayer-client');
 
+      // Get the actual provider object for the connected wallet
+      const actualProvider = getProviderForWallet(walletState.provider as any);
+      if (!actualProvider) {
+        throw new Error('Could not find provider for connected wallet');
+      }
+
+      // Get the actual signer address (EOA - used for signing only)
+      const accounts = await actualProvider.request({ method: 'eth_requestAccounts' });
+      const eoaAddress = accounts[0];
+
+      // Get Safe wallet address (maker/funder - holds the funds)
+      showToast('Getting Safe wallet address...', 'info');
+      let safeAddress: string | null = null;
+
+      // Try localStorage first
+      safeAddress = localStorage.getItem(`safe_${eoaAddress}`);
+
+      // If not in localStorage, derive it
+      if (!safeAddress && walletState.signer) {
+        try {
+          const relayerClient = await createRelayerClient(walletState.signer, undefined);
+          safeAddress = await getExpectedSafeAddress(relayerClient, eoaAddress);
+        } catch (err) {
+          console.error('Error getting Safe address:', err);
+        }
+      }
+
+      if (!safeAddress) {
+        throw new Error('Safe wallet not found. Please deploy your Safe wallet first.');
+      }
+
+      // Build typed data with Safe as maker
       const typedData = buildOrderTypedData({
         price: orderParams.price,
         size: orderParams.size,
         side: orderParams.side,
         tokenID: orderParams.tokenId,
-        maker: walletState.address,
+        maker: safeAddress, // Safe wallet (holds funds)
       });
 
-      // Step 4: Sign using the wallet manager (with validation)
+      // Sign using the EOA (MetaMask)
       showToast('Please sign the order in your wallet...', 'info');
-      const signature = await signTypedDataWithWallet(provider, walletState.address, typedData);
+      const signature = await signTypedDataWithWallet(actualProvider, eoaAddress, typedData);
 
-      // Step 5: Send to server API
+      // Send to server API
       showToast('Placing order...', 'info');
       const response = await fetch('/api/placeOrder', {
         method: 'POST',
@@ -124,13 +151,12 @@ export default function Home() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          tokenID: orderParams.tokenId,
           price: orderParams.price,
           size: orderParams.size,
           side: orderParams.side,
-          tokenID: orderParams.tokenId,
-          typedData,
-          signature,
-          signerAddress: walletState.address,
+          userSignature: signature,
+          userAddress: safeAddress, // Safe address (maker/funder)
         }),
       });
 
@@ -141,9 +167,8 @@ export default function Home() {
       }
 
       showToast('Order placed successfully!', 'success');
-
-      // Reset form
       setMarketData(null);
+
     } catch (error: any) {
       console.error('Order placement error:', error);
 
