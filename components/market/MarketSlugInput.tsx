@@ -10,7 +10,7 @@ interface MarketSlugInputProps {
 }
 
 export function MarketSlugInput({ onFetch, isLoading = false }: MarketSlugInputProps) {
-  const [slug, setSlug] = useState('');
+  const [slug, setSlug] = useState('will-bitcoin-reach-1000000-by-december-31-2025');
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

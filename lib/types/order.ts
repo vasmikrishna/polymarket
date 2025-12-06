@@ -4,15 +4,28 @@ export interface OrderParams {
   price: string;
   size: string;
   side: 'BUY' | 'SELL';
+  nonce: number;        // Required
+  expiration: number;   // Required (timestamp)
   feeRateBps?: number;
-  nonce?: number;
-  expiration?: number;
 }
 
 export interface SignedOrder {
   order: OrderParams;
   signature: string;
   signer: string;
+}
+
+export interface ClobOrder {
+  maker: string;
+  tokenID: string | any; // Can be string or BigNumber from ethers-v5
+  price: string | any;   // Can be string or BigNumber from ethers-v5
+  size: string | any;    // Can be string or BigNumber from ethers-v5
+  side: number;          // 0=BUY, 1=SELL
+  nonce: number;
+  expiration: number;
+  feeRateBps?: number;
+  signature: string;
+  signatureType?: number;
 }
 
 export interface OrderResponse {

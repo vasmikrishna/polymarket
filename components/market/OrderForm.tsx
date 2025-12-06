@@ -50,6 +50,7 @@ export function OrderForm({ marketData, onPlaceOrder, isLoading = false }: Order
     }
 
     const tokenId = marketData.clobTokenIds[selectedOutcome];
+    console.log('tokenId', tokenId);
     if (!tokenId) {
       alert('Invalid token ID');
       return;

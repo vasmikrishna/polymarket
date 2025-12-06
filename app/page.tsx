@@ -101,7 +101,26 @@ export default function Home() {
         throw chainError;
       }
 
-      // Step 3: Build EIP-712 typed data
+      // Step 3: Build complete order structure with nonce and expiration
+      // Generate nonce (using timestamp for uniqueness)
+      const nonce = Math.floor(Date.now() / 1000);
+      // Set expiration to 1 hour from now
+      const expiration = Math.floor(Date.now() / 1000) + 3600;
+
+      // Build order for user authorization
+      // Server will re-sign with POLY_PROXY after verifying user signature
+      const completeOrder = {
+        maker: walletState.address,
+        tokenID: orderParams.tokenId,
+        price: orderParams.price,
+        size: orderParams.size,
+        side: orderParams.side,
+        nonce,
+        expiration,
+        feeRateBps: 0,
+      };
+
+      // Step 4: Build EIP-712 typed data with complete order structure
       const { buildOrderTypedData } = await import('@/lib/utils/eip712');
 
       const typedData = buildOrderTypedData({
@@ -110,13 +129,15 @@ export default function Home() {
         side: orderParams.side,
         tokenID: orderParams.tokenId,
         maker: walletState.address,
+        nonce,
+        expiration,
       });
 
-      // Step 4: Sign using the wallet manager (with validation)
+      // Step 5: Sign using the wallet manager (with validation)
       showToast('Please sign the order in your wallet...', 'info');
       const signature = await signTypedDataWithWallet(provider, walletState.address, typedData);
 
-      // Step 5: Send to server API
+      // Step 6: Send complete order + signature to server API
       showToast('Placing order...', 'info');
       const response = await fetch('/api/placeOrder', {
         method: 'POST',
@@ -124,13 +145,10 @@ export default function Home() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          price: orderParams.price,
-          size: orderParams.size,
-          side: orderParams.side,
-          tokenID: orderParams.tokenId,
-          typedData,
+          order: completeOrder,
           signature,
           signerAddress: walletState.address,
+          typedData,
         }),
       });
 

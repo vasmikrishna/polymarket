@@ -32,12 +32,15 @@ export interface OrderTypedData {
         size: string;
         side: string;
         tokenID: string;
+        nonce: string;
+        expiration: string;
     };
 }
 
 /**
  * Build EIP-712 typed data for Polymarket order signing
  * MetaMask compatible (string values, includes EIP712Domain in types)
+ * Includes complete CLOB order structure with nonce and expiration
  */
 export function buildOrderTypedData(params: {
     price: string;
@@ -45,6 +48,8 @@ export function buildOrderTypedData(params: {
     side: string;
     tokenID: string;
     maker: string;
+    nonce: number;
+    expiration: number;
 }): OrderTypedData {
     return {
         domain: {
@@ -66,6 +71,8 @@ export function buildOrderTypedData(params: {
                 { name: 'size', type: 'uint256' },
                 { name: 'side', type: 'uint256' },
                 { name: 'tokenID', type: 'uint256' },
+                { name: 'nonce', type: 'uint256' },
+                { name: 'expiration', type: 'uint256' },
             ],
         },
         primaryType: 'Order',
@@ -75,6 +82,8 @@ export function buildOrderTypedData(params: {
             size: toWeiString(params.size),
             side: (params.side === 'BUY' ? 0 : 1).toString(),
             tokenID: params.tokenID.toString(),
+            nonce: params.nonce.toString(),
+            expiration: params.expiration.toString(),
         },
     };
 }
