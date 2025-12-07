@@ -9,9 +9,10 @@ import { createRelayerClient, deploySafeWallet, getExpectedSafeAddress } from '@
 interface ProxyWalletDisplayProps {
   userAddress: string | null;
   signer: ethers.JsonRpcSigner | ethers.Wallet | null;
+  onProxyAddressFound?: (address: string) => void;
 }
 
-export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayProps) {
+export function ProxyWalletDisplay({ userAddress, signer, onProxyAddressFound }: ProxyWalletDisplayProps) {
   const [safeInfo, setSafeInfo] = useState<SafeWalletInfo | null>(null);
   const [isDeploying, setIsDeploying] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -53,6 +54,7 @@ export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayPr
             if (isDeployed) {
               localStorage.setItem(`safe_${userAddress}`, expectedAddress);
               await fetchSafeData(expectedAddress);
+              if (onProxyAddressFound) onProxyAddressFound(expectedAddress);
             }
           }
         } catch (error) {
@@ -70,6 +72,9 @@ export function ProxyWalletDisplay({ userAddress, signer }: ProxyWalletDisplayPr
 
     setIsLoading(true);
     setError(null);
+
+    // Notify parent of proxy address
+    if (onProxyAddressFound) onProxyAddressFound(safeAddress);
 
     try {
       // Fetch MATIC balance

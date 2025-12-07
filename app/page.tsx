@@ -19,6 +19,7 @@ export default function Home() {
   const [isLoadingMarket, setIsLoadingMarket] = useState(false);
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
   const [marketError, setMarketError] = useState<string | null>(null);
+  const [proxyWalletAddress, setProxyWalletAddress] = useState<string | null>(null);
 
   const handleWalletConnected = (state: any) => {
     setWalletState(state);
@@ -108,9 +109,12 @@ export default function Home() {
       const expiration = Math.floor(Date.now() / 1000) + 3600;
 
       // Build order for user authorization
-      // Server will re-sign with POLY_PROXY after verifying user signature
+      // If proxy wallet is being used, MAKER must be the PROXY address (funder)
+      // Otherwise, MAKER is the EOA address (signer)
+      const makerAddress = proxyWalletAddress || walletState.address;
+
       const completeOrder = {
-        maker: walletState.address,
+        maker: makerAddress,
         tokenID: orderParams.tokenId,
         price: orderParams.price,
         size: orderParams.size,
@@ -128,7 +132,7 @@ export default function Home() {
         size: orderParams.size,
         side: orderParams.side,
         tokenID: orderParams.tokenId,
-        maker: walletState.address,
+        maker: makerAddress,
         nonce,
         expiration,
       });
@@ -149,6 +153,7 @@ export default function Home() {
           signature,
           signerAddress: walletState.address,
           typedData,
+          proxyWalletAddress: proxyWalletAddress || undefined,
         }),
       });
 
@@ -216,6 +221,7 @@ export default function Home() {
               <ProxyWalletDisplay
                 userAddress={walletState.address}
                 signer={walletState.signer}
+                onProxyAddressFound={setProxyWalletAddress}
               />
             </section>
           </div>

@@ -6,12 +6,12 @@ import { Wallet as WalletV5, providers as providersV5 } from 'ethers-v5';
 import { sanitizeBase64Secret } from '@/lib/utils/config';
 
 // SignatureType enum - matches @polymarket/clob-client specification
-const SignatureType = { EOA: 0, POLY_PROXY: 1 };
+const SignatureType = { EOA: 0, POLY_PROXY: 1, POLY_GNOSIS_SAFE: 2 };
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { order, typedData, signature, signerAddress, tickSize } = body;
+    const { order, typedData, signature, signerAddress, tickSize, proxyWalletAddress } = body;
 
     // Validate required params
     if (!order || !typedData || !signature || !signerAddress) {
@@ -95,14 +95,23 @@ export async function POST(request: NextRequest) {
     console.log('[Order Placement] API Key:', clobCreds.key);
     console.log('[Order Placement] Builder Enabled:', !!builderCreds.key);
 
+    // Get funder address (where USDC is stored)
+    // Use the proxy address from request if provided, otherwise use signer address
+    const funderAddress = proxyWalletAddress || serverWallet.address;
+    const isProxyWallet = !!proxyWalletAddress;
+
+    console.log('[Order Placement] Signer (EOA):', serverWallet.address);
+    console.log('[Order Placement] Funder:', funderAddress);
+    console.log('[Order Placement] Using Proxy Wallet:', isProxyWallet);
+
     // Initialize ClobClient with Builder config for gasless transactions
     const clobClient = new ClobClient(
       'https://clob.polymarket.com',
       137,  // Polygon mainnet
-      serverWallet as any,
+      serverWallet as any,  // Signer (EOA)
       clobCreds,
-      SignatureType.EOA,  // Signature type = 0 (EOA for direct private key wallets)
-      serverWallet.address,  // Funder = server wallet address (same as signer for EOA)
+      isProxyWallet ? SignatureType.POLY_GNOSIS_SAFE : SignatureType.EOA,  // Use POLY_GNOSIS_SAFE (2) for proxy wallet
+      funderAddress,  // Funder = proxy wallet address or signer address
       undefined,  // builderFee
       false,  // autoFill
       builderConfig as any  // Builder config for gasless transactions
